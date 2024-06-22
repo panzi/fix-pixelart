@@ -15,6 +15,15 @@ and animated WebPs, but doesn't support writing them it will only write the
 first frame as a still image if the input is an animation and the output is
 PNG or WebP.
 
+## Examples
+
+| Input | Output |
+|:-:|:-:|
+| ![Animated GIF of a rotating pixelated coin](https://i.imgur.com/rDBpFfX.gif) | ![Same coin at it's native resolution](https://i.imgur.com/VQdh4aT.gif) |
+| ![Pixel art scotch glass being filled](https://i.imgur.com/UMQFFNO.gif) | ![Same scotch glass at it's native resolution](https://i.imgur.com/PgYFKJr.gif) |
+
+Both images &copy; Mathias Panzenböck.
+
 ## Usage
 
 ```plain
