@@ -52,7 +52,8 @@ Options:
 
   -f, --only-analyze-first
           Only analyze the first frame of an animation.
-          This can lead to a big speed-up, but will create a 1x1 pixel image if the first frame is a blank screen.
+          This can lead to a big speed-up, but will create a 1x1 pixel image if the first
+          frame is a blank screen.
 
   -h, --help
           Print help (see a summary with '-h')
