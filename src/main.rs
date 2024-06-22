@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::BufWriter;
+use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -22,13 +23,23 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     in_place: bool,
 
+    /// Only analyze the file and print the new size as `{width}x{height}`.
+    /// This can be used if scaling shall be done with a different tool, e.g. ImageMagick:
+    /// 
+    /// if size=$(fix-pixelart -a image.gif); then
+    ///     convert image.gif -scale "$size" scaled.gif
+    /// fi
+    #[clap(verbatim_doc_comment)]
+    #[arg(short = 'a', long, default_value_t = false)]
+    only_analyze: bool,
+
     /// Only analyze the first frame of an animation.
     /// This can lead to a big speed-up, but will create a 1x1 pixel image if the first frame is a blank screen.
     #[clap(verbatim_doc_comment)]
     #[arg(short = 'f', long, default_value_t = false)]
     only_analyze_first: bool,
 
-    /// File to resize.
+    /// Image to resize.
     #[arg()]
     input: OsString,
 
@@ -172,10 +183,15 @@ fn resize_still_image(img: &DynamicImage, output_format: ImageFormat, args: Args
         eprintln!("failed to detect pixel art scaling");
         std::process::exit(1);
     }
-    let width  = img.width()  / min_stride;
-    let height = img.height() / min_stride;
-    println!("resizing {} x {} -> {width} x {height}", img.width(), img.height());
-    let img = imageops::resize(img, width, height, FilterType::Nearest);
+    let (width, height) = img.dimensions();
+    let new_width  = width  / min_stride;
+    let new_height = height / min_stride;
+    if args.only_analyze {
+        println!("{new_width}x{new_height}");
+        return Ok(());
+    }
+    println!("resizing {width} x {height} -> {new_width} x {new_height}");
+    let img = imageops::resize(img, new_width, new_height, FilterType::Nearest);
     img.write_to(&mut BufWriter::new(File::options().write(true).create(true).open(&output)?), output_format)?;
     println!("written {output:?}");
     Ok(())
@@ -187,12 +203,20 @@ fn output_from(output: Option<OsString>, input: &OsStr, in_place: bool, format: 
     } else if in_place {
         input.to_owned()
     } else {
-        let input = input.to_string_lossy();
-        if let Some((name, _)) = input.rsplit_once('.') {
-            OsString::from(format!("{name}.scaled.{}", format.extensions_str()[0]))
+        let path = Path::new(input);
+        let mut output = OsString::new();
+        if let Some(stem) = path.file_stem() {
+            if let Some(parent) = path.parent() {
+                output.push(parent.as_os_str());
+                output.push(std::path::MAIN_SEPARATOR.to_string());
+            }
+            output.push(stem);
         } else {
-            OsString::from(format!("{input}.scaled.{}", format.extensions_str()[0]))
+            output.push(input);
         }
+        output.push(".scaled.");
+        output.push(format.extensions_str()[0]);
+        output
     }
 }
 
@@ -216,7 +240,14 @@ fn resize_as_animated_gif(width: u32, height: u32, input_frames: Frames, args: A
         std::process::exit(1);
     }
 
-    println!("resizing {width} x {height} -> {} x {}", width / min_stride, height / min_stride);
+    let new_width = width / min_stride;
+    let new_height = height / min_stride;
+    if args.only_analyze {
+        println!("{new_width}x{new_height}");
+        return Ok(());
+    }
+
+    println!("resizing {width} x {height} -> {new_width} x {new_height}");
     let output = output_from(args.output, args.input.as_os_str(), args.in_place, ImageFormat::Gif);
     let writer = BufWriter::new(File::options().write(true).create(true).open(&output)?);
     let mut encoder = GifEncoder::new(writer);
@@ -258,7 +289,9 @@ fn resize_animation<'a>(decoder: impl AnimationDecoder<'a> + ImageDecoder, outpu
     if output_format == ImageFormat::Gif {
         resize_as_animated_gif(width, height, decoder.into_frames(), args)?;
     } else {
-        print_animation_downgrade_warning_if_needed(output_format);
+        if !args.only_analyze {
+            print_animation_downgrade_warning_if_needed(output_format);
+        }
         resize_still_image(&DynamicImage::from_decoder(decoder)?, output_format, args)?;
     }
     Ok(())
@@ -297,7 +330,9 @@ fn main() -> ImageResult<()> {
                 if output_format == ImageFormat::Gif {
                     resize_as_animated_gif(width, height, decoder.apng()?.into_frames(), args)?;
                 } else {
-                    print_animation_downgrade_warning_if_needed(output_format);
+                    if !args.only_analyze {
+                        print_animation_downgrade_warning_if_needed(output_format);
+                    }
                     resize_still_image(&DynamicImage::from_decoder(decoder)?, output_format, args)?;
                 }
             } else {

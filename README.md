@@ -30,17 +30,33 @@ Both images &copy; Mathias Panzenböck.
 Usage: fix-pixelart [OPTIONS] <INPUT> [OUTPUT]
 
 Arguments:
-  <INPUT>   File to resize
-  [OUTPUT]  Where to write the output.
-            [default: "{basename}.scaled.{ext}"]
+  <INPUT>
+          Image to resize
+
+  [OUTPUT]
+          Where to write the output.
+          [default: "{basename}.scaled.{ext}"]
 
 Options:
-  -i, --in-place            Overwrite the original file.
-                            Ignored if an explicit output is defined.
-  -f, --only-analyze-first  Only analyze the first frame of an animation.
-                            This can lead to a big speed-up, but will create
-                            a 1x1 pixel image if the first frame is a blank
-                            screen.
-  -h, --help                Print help
-  -V, --version             Print version
+  -i, --in-place
+          Overwrite the original file.
+          Ignored if an explicit output is defined.
+
+  -a, --only-analyze
+          Only analyze the file and print the new size as `{width}x{height}`.
+          This can be used if scaling shall be done with a different tool, e.g. ImageMagick:
+          
+          if size=$(fix-pixelart -a image.gif); then
+              convert image.gif -scale "$size" scaled.gif
+          fi
+
+  -f, --only-analyze-first
+          Only analyze the first frame of an animation.
+          This can lead to a big speed-up, but will create a 1x1 pixel image if the first frame is a blank screen.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
 ```
