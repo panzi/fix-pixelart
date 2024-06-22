@@ -1,9 +1,9 @@
 use clap::Parser;
 
-use image::codecs::gif::{GifDecoder, GifEncoder};
+use image::codecs::gif::{GifDecoder, GifEncoder, Repeat};
 use image::codecs::png::PngDecoder;
 use image::codecs::webp::WebPDecoder;
-use image::{GenericImageView, ImageFormat, ImageResult};
+use image::{Frames, GenericImageView, ImageFormat, ImageResult};
 use image::io::Reader as ImageReader;
 use image::{AnimationDecoder, DynamicImage, Frame, ImageDecoder, Rgba};
 use image::imageops::{self, FilterType};
@@ -18,15 +18,23 @@ use std::io::BufWriter;
 struct Args {
     /// Overwrite the original file.
     /// Ignored if an explicit output is defined.
-    #[arg(long, default_value_t = false)]
+    #[clap(verbatim_doc_comment)]
+    #[arg(short, long, default_value_t = false)]
     in_place: bool,
+
+    /// Only analyze the first frame of an animation.
+    /// This can lead to a big speed-up, but will create a 1x1 pixel image if the first frame is a blank screen.
+    #[clap(verbatim_doc_comment)]
+    #[arg(short = 'f', long, default_value_t = false)]
+    only_analyze_first: bool,
 
     /// File to resize.
     #[arg()]
     input: OsString,
 
     /// Where to write the output.
-    /// [default: "{input-without-ext}.scaled.{ext}"]
+    /// [default: "{basename}.scaled.{ext}"]
+    #[clap(verbatim_doc_comment)]
     #[arg(default_value = None)]
     output: Option<OsString>,
 }
@@ -157,7 +165,8 @@ fn get_smallest_stride_from_animation<'a>(width: u32, height: u32, frames: impl 
     Ok(min_stride)
 }
 
-fn resize_still_image(img: &DynamicImage, output: &OsStr, format: ImageFormat) -> ImageResult<()> {
+fn resize_still_image(img: &DynamicImage, output_format: ImageFormat, args: Args) -> ImageResult<()> {
+    let output = output_from(args.output, args.input.as_os_str(), args.in_place, output_format);
     let min_stride = get_smallest_stride(&img);
     if min_stride <= 1 {
         eprintln!("failed to detect pixel art scaling");
@@ -167,7 +176,7 @@ fn resize_still_image(img: &DynamicImage, output: &OsStr, format: ImageFormat) -
     let height = img.height() / min_stride;
     println!("resizing {} x {} -> {width} x {height}", img.width(), img.height());
     let img = imageops::resize(img, width, height, FilterType::Nearest);
-    img.write_to(&mut BufWriter::new(File::options().write(true).create(true).open(&output)?), format)?;
+    img.write_to(&mut BufWriter::new(File::options().write(true).create(true).open(&output)?), output_format)?;
     println!("written {output:?}");
     Ok(())
 }
@@ -187,6 +196,74 @@ fn output_from(output: Option<OsString>, input: &OsStr, in_place: bool, format: 
     }
 }
 
+fn resize_as_animated_gif(width: u32, height: u32, input_frames: Frames, args: Args) -> ImageResult<()> {
+    let mut frames = Vec::new();
+    for frame in input_frames {
+        let frame: Frame = frame?;
+        frames.push((frame.delay(), frame.left(), frame.top(), DynamicImage::from(frame.into_buffer())));
+    }
+    let min_stride = if args.only_analyze_first {
+        if let Some((_, _, _, img)) = frames.iter().next() {
+            get_smallest_stride(img)
+        } else {
+            0
+        }
+    } else {
+        get_smallest_stride_from_animation(width, height, frames.iter().map(|(_, _, _, img)| img))?
+    };
+    if min_stride <= 1 {
+        eprintln!("failed to detect pixel art scaling");
+        std::process::exit(1);
+    }
+
+    println!("resizing {width} x {height} -> {} x {}", width / min_stride, height / min_stride);
+    let output = output_from(args.output, args.input.as_os_str(), args.in_place, ImageFormat::Gif);
+    let writer = BufWriter::new(File::options().write(true).create(true).open(&output)?);
+    let mut encoder = GifEncoder::new(writer);
+    if frames.len() > 1 {
+        // XXX: the image crate doesn't support reading the repeat and speed parameters of animated GIFs!
+        encoder.set_repeat(Repeat::Infinite)?;
+    }
+    for (delay, left, top, img) in frames {
+        let buffer = imageops::resize(&img, img.width() / min_stride, img.height() / min_stride, FilterType::Nearest);
+        encoder.encode_frame(Frame::from_parts(buffer, left / min_stride, top / min_stride, delay))?;
+    }
+    println!("written {output:?}");
+    Ok(())
+}
+
+fn print_animation_downgrade_warning_if_needed(output_format: ImageFormat) {
+    match output_format {
+        ImageFormat::Png => {
+            print_warning("PNG");
+        }
+        ImageFormat::WebP => {
+            print_warning("WebP");
+        }
+        ImageFormat::Gif => {}
+        _ => {
+            // If this happens there is a new animated format that I only handled in some part of the code.
+            let format_name = output_format.extensions_str()[0].to_ascii_uppercase();
+            print_warning(&format_name);
+        }
+    }
+
+    fn print_warning(format_name: &str) {
+        eprintln!("animated {format_name} images are not supported, writing still image instead");
+    }
+}
+
+fn resize_animation<'a>(decoder: impl AnimationDecoder<'a> + ImageDecoder, output_format: ImageFormat, args: Args) -> ImageResult<()> {
+    let (width, height) = decoder.dimensions();
+    if output_format == ImageFormat::Gif {
+        resize_as_animated_gif(width, height, decoder.into_frames(), args)?;
+    } else {
+        print_animation_downgrade_warning_if_needed(output_format);
+        resize_still_image(&DynamicImage::from_decoder(decoder)?, output_format, args)?;
+    }
+    Ok(())
+}
+
 fn main() -> ImageResult<()> {
     let args = Args::parse();
 
@@ -198,59 +275,38 @@ fn main() -> ImageResult<()> {
 
     let reader = ImageReader::open(&args.input)?.with_guessed_format()?;
     let maybe_format = reader.format();
+    let output_format = output_format.unwrap_or(maybe_format.unwrap_or(ImageFormat::Png));
 
     match maybe_format {
         Some(ImageFormat::Gif) => {
             let decoder = GifDecoder::new(reader.into_inner())?;
-            let (width, height) = decoder.dimensions();
-            let mut frames = Vec::new();
-            for frame in decoder.into_frames() {
-                let frame: Frame = frame?;
-                frames.push((frame.delay(), frame.left(), frame.top(), DynamicImage::from(frame.into_buffer())));
-            }
-            let min_stride = get_smallest_stride_from_animation(width, height, frames.iter().map(|(_, _, _, img)| img))?;
-            if min_stride <= 1 {
-                eprintln!("failed to detect pixel art scaling");
-                std::process::exit(1);
-            }
-
-            println!("resizing {width} x {height} -> {} x {}", width / min_stride, height / min_stride);
-            let output = output_from(args.output, args.input.as_os_str(), args.in_place, ImageFormat::Gif);
-            let writer = BufWriter::new(File::options().write(true).create(true).open(&output)?);
-            let mut encoder = GifEncoder::new(writer);
-            for (delay, left, top, img) in frames {
-                let buffer = imageops::resize(&img, img.width() / min_stride, img.height() / min_stride, FilterType::Nearest);
-                encoder.encode_frame(Frame::from_parts(buffer, left / min_stride, top / min_stride, delay))?;
-            }
-            println!("written {output:?}");
+            resize_animation(decoder, output_format, args)?;
         }
         Some(ImageFormat::WebP) => {
             let decoder = WebPDecoder::new(reader.into_inner())?;
             if decoder.has_animation() {
-                eprintln!("animated WebP images are not supported!");
-                std::process::exit(1);
+                resize_animation(decoder, output_format, args)?;
             } else {
-                let output_format = output_format.unwrap_or(ImageFormat::WebP);
-                let output = output_from(args.output, args.input.as_os_str(), args.in_place, output_format);
-                resize_still_image(&DynamicImage::from_decoder(decoder)?, output.as_os_str(), output_format)?;
+                resize_still_image(&DynamicImage::from_decoder(decoder)?, output_format, args)?;
             }
         }
         Some(ImageFormat::Png) => {
             let decoder = PngDecoder::new(reader.into_inner())?;
             if decoder.is_apng()? {
-                eprintln!("animated PNG images are not supported!");
-                std::process::exit(1);
+                let (width, height) = decoder.dimensions();
+                if output_format == ImageFormat::Gif {
+                    resize_as_animated_gif(width, height, decoder.apng()?.into_frames(), args)?;
+                } else {
+                    print_animation_downgrade_warning_if_needed(output_format);
+                    resize_still_image(&DynamicImage::from_decoder(decoder)?, output_format, args)?;
+                }
             } else {
-                let output_format = output_format.unwrap_or(ImageFormat::Png);
-                let output = output_from(args.output, args.input.as_os_str(), args.in_place, output_format);
-                resize_still_image(&DynamicImage::from_decoder(decoder)?, output.as_os_str(), output_format)?;
+                resize_still_image(&DynamicImage::from_decoder(decoder)?, output_format, args)?;
             }
         }
         _ => {
             let img = reader.decode()?;
-            let output_format = output_format.unwrap_or(maybe_format.unwrap_or(ImageFormat::Png));
-            let output = output_from(args.output, args.input.as_os_str(), args.in_place, output_format);
-            resize_still_image(&img, output.as_os_str(), output_format)?;
+            resize_still_image(&img, output_format, args)?;
         }
     }
 
