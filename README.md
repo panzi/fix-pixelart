@@ -51,10 +51,15 @@ Options:
               convert image.gif -scale "$size" scaled.gif
           fi
 
-  -f, --only-analyze-first
+  -f, --only-analyze-first-frame
           Only analyze the first frame of an animation.
           This can lead to a big speed-up, but will create a 1x1 pixel image if the first
           frame is a blank screen.
+
+  -b, --ignore-border
+          Ignore pixels at the border of the image. Sometimes pixel art is framed in a
+          border that doesn't fit the pixel grid. This uses an extremely primitive strategy
+          to ignore those.
 
   -h, --help
           Print help (see a summary with '-h')
