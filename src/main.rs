@@ -46,6 +46,12 @@ struct Args {
     #[arg(short = 'b', long, default_value_t = false)]
     ignore_border: bool,
 
+    /// Primitive fuzzy matching of colors.
+    /// This is a threshold value from 0 (no-fuzzy) to 255 for how much a color of a pixel may be differnt in each channel to the first pixel of the stride.
+    #[clap(verbatim_doc_comment)]
+    #[arg(short = 'z', long, default_value_t = 0)]
+    fuzzy: u8,
+
     /// Image to resize.
     #[arg()]
     input: OsString,
@@ -64,12 +70,97 @@ struct CurrentStride {
 }
 
 #[inline]
-fn get_smallest_stride(img: &DynamicImage, ignore_border: bool) -> u32 {
+fn get_smallest_stride(img: &DynamicImage, ignore_border: bool, threshold: u8) -> u32 {
     let mut strides = HashSet::new();
-    if !get_smallest_stride_phase1(img, &mut strides, ignore_border) {
-        return 1;
+    if threshold == 0 {
+        if !get_smallest_stride_phase1(img, &mut strides, ignore_border) {
+            return 1;
+        }
+    } else {
+        if !get_smallest_stride_phase1_fuzzy(img, &mut strides, ignore_border, threshold) {
+            return 1;
+        }
     }
     get_smallest_stride_phase2(&mut strides)
+}
+
+#[inline]
+fn colors_fuzzy_equals(col1: &Rgba<u8>, col2: &Rgba<u8>, threshold: u8) -> bool {
+    let dr = (col1[0] as i32 - col2[0] as i32).abs();
+    let dg = (col1[1] as i32 - col2[1] as i32).abs();
+    let db = (col1[2] as i32 - col2[2] as i32).abs();
+    let da = (col1[3] as i32 - col2[3] as i32).abs();
+
+    let threshold = threshold as i32;
+    ((dr <= threshold) as u32 & (dg <= threshold) as u32 & (db <= threshold) as u32 & (da <= threshold) as u32) != 0
+}
+
+fn get_smallest_stride_phase1_fuzzy(img: &DynamicImage, strides: &mut HashSet<u32>, ignore_border: bool, threshold: u8) -> bool {
+    let mut curr_y = (0..img.width()).map(|_| CurrentStride {
+        color: Rgba([0, 0, 0, 0]),
+        stride: 0,
+    }).collect::<Vec<_>>();
+
+    for y in 0..img.height() {
+        let mut curr_x = CurrentStride {
+            color: Rgba([0, 0, 0, 0]),
+            stride: 0,
+        };
+        for x in 0..img.width() {
+            let color = img.get_pixel(x, y);
+            if colors_fuzzy_equals(&color, &curr_x.color, threshold) {
+                curr_x.stride += 1;
+            } else {
+                if !ignore_border || x > curr_x.stride {
+                    if curr_x.stride == 1 {
+                        return false;
+                    }
+                    if curr_x.stride > 0 && curr_x.color[3] > 0 {
+                        strides.insert(curr_x.stride);
+                    }
+                }
+                curr_x.stride = 1;
+                curr_x.color  = color;
+            }
+
+            let curr_y = &mut curr_y[x as usize];
+            if colors_fuzzy_equals(&curr_y.color, &color, threshold) {
+                curr_y.stride += 1;
+            } else {
+                if !ignore_border || y > curr_y.stride {
+                    if curr_y.stride == 1 {
+                        return false;
+                    }
+                    if curr_y.stride > 0 && curr_y.color[3] > 0 {
+                        strides.insert(curr_y.stride);
+                    }
+                }
+                curr_y.stride = 1;
+                curr_y.color  = color;
+            }
+        }
+        if !ignore_border {
+            if curr_x.stride == 1 {
+                return false;
+            }
+            if curr_x.stride > 0 && curr_x.color[3] > 0 {
+                strides.insert(curr_x.stride);
+            }
+        }
+    }
+
+    if !ignore_border {
+        for curr_y in &curr_y {
+            if curr_y.stride == 1 {
+                return false;
+            }
+            if curr_y.stride > 0 && curr_y.color[3] > 0 {
+                strides.insert(curr_y.stride);
+            }
+        }
+    }
+
+    return true;
 }
 
 fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>, ignore_border: bool) -> bool {
@@ -171,11 +262,19 @@ fn get_smallest_stride_phase2(strides: &HashSet<u32>) -> u32 {
 }
 
 
-fn get_smallest_stride_from_animation<'a>(frames: impl Iterator<Item=&'a DynamicImage>, ignore_border: bool) -> ImageResult<u32> {
+fn get_smallest_stride_from_animation<'a>(frames: impl Iterator<Item=&'a DynamicImage>, ignore_border: bool, threshold: u8) -> ImageResult<u32> {
     let mut strides = HashSet::new();
-    for frame in frames {
-        if !get_smallest_stride_phase1(frame, &mut strides, ignore_border) {
-            return Ok(1);
+    if threshold == 0 {
+        for frame in frames {
+            if !get_smallest_stride_phase1(frame, &mut strides, ignore_border) {
+                return Ok(1);
+            }
+        }
+    } else {
+        for frame in frames {
+            if !get_smallest_stride_phase1_fuzzy(frame, &mut strides, ignore_border, threshold) {
+                return Ok(1);
+            }
         }
     }
 
@@ -186,7 +285,7 @@ fn get_smallest_stride_from_animation<'a>(frames: impl Iterator<Item=&'a Dynamic
 
 fn resize_still_image(img: &DynamicImage, output_format: ImageFormat, args: Args) -> ImageResult<()> {
     let output = output_from(args.output, args.input.as_os_str(), args.in_place, output_format)?;
-    let min_stride = get_smallest_stride(&img, args.ignore_border);
+    let min_stride = get_smallest_stride(&img, args.ignore_border, args.fuzzy);
     if min_stride <= 1 {
         eprintln!("failed to detect pixel art scaling");
         std::process::exit(1);
@@ -259,12 +358,12 @@ fn resize_as_animated_gif(width: u32, height: u32, input_frames: Frames, args: A
     }
     let min_stride = if args.only_analyze_first_frame {
         if let Some((_, _, _, img)) = frames.iter().next() {
-            get_smallest_stride(img, args.ignore_border)
+            get_smallest_stride(img, args.ignore_border, args.fuzzy)
         } else {
             0
         }
     } else {
-        get_smallest_stride_from_animation(frames.iter().map(|(_, _, _, img)| img), args.ignore_border)?
+        get_smallest_stride_from_animation(frames.iter().map(|(_, _, _, img)| img), args.ignore_border, args.fuzzy)?
     };
     if min_stride <= 1 {
         eprintln!("failed to detect pixel art scaling");
