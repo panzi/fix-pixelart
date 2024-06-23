@@ -8,7 +8,6 @@ use image::io::Reader as ImageReader;
 use image::{AnimationDecoder, DynamicImage, Frame, ImageDecoder, Rgba};
 use image::imageops::{self, FilterType};
 
-use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::BufWriter;
@@ -65,14 +64,14 @@ struct CurrentStride {
 
 #[inline]
 fn get_smallest_stride(img: &DynamicImage, ignore_border: bool) -> u32 {
-    let mut strides = HashSet::new();
+    let mut strides = vec![false; img.width().max(img.height()) as usize + 1];
     if !get_smallest_stride_phase1(img, &mut strides, ignore_border) {
         return 1;
     }
-    get_smallest_stride_phase2(&mut strides)
+    get_smallest_stride_phase2(&strides)
 }
 
-fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>, ignore_border: bool) -> bool {
+fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut [bool], ignore_border: bool) -> bool {
     let mut curr_y = (0..img.width()).map(|_| CurrentStride {
         color: Rgba([0, 0, 0, 0]),
         stride: 0,
@@ -93,7 +92,7 @@ fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>, ig
                         return false;
                     }
                     if curr_x.stride > 0 && curr_x.color[3] > 0 {
-                        strides.insert(curr_x.stride);
+                        strides[curr_x.stride as usize] = true;
                     }
                 }
                 curr_x.stride = 1;
@@ -109,7 +108,7 @@ fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>, ig
                         return false;
                     }
                     if curr_y.stride > 0 && curr_y.color[3] > 0 {
-                        strides.insert(curr_y.stride);
+                        strides[curr_y.stride as usize] = true;
                     }
                 }
                 curr_y.stride = 1;
@@ -121,7 +120,7 @@ fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>, ig
                 return false;
             }
             if curr_x.stride > 0 && curr_x.color[3] > 0 {
-                strides.insert(curr_x.stride);
+                strides[curr_x.stride as usize] = true;
             }
         }
     }
@@ -132,7 +131,7 @@ fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>, ig
                 return false;
             }
             if curr_y.stride > 0 && curr_y.color[3] > 0 {
-                strides.insert(curr_y.stride);
+                strides[curr_y.stride as usize] = true;
             }
         }
     }
@@ -140,29 +139,20 @@ fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>, ig
     return true;
 }
 
-fn get_smallest_stride_phase2(strides: &HashSet<u32>) -> u32 {
-    let mut strides = strides.iter().cloned().collect::<Vec<_>>();
-    strides.sort();
-
-    let mut iter = strides.iter().cloned();
-
-    let Some(mut min_stride) = iter.next() else {
+fn get_smallest_stride_phase2(strides: &[bool]) -> u32 {
+    let Some(min_stride) = strides[1..].iter().cloned().position(|found| found).map(|pos| pos + 1) else {
         return 1;
     };
-
-    if min_stride == 0 {
-        let Some(next_stride) = iter.next() else {
-            return 1;
-        };
-        min_stride = next_stride;
-    }
+    let offset = min_stride + 1;
+    let min_stride = min_stride as u32;
 
     if min_stride == 1 {
         return 1;
     }
 
-    for other in iter {
-        if other % min_stride != 0 {
+    for (stride, found) in strides[offset..].iter().cloned().enumerate() {
+        let stride = (stride + offset) as u32;
+        if found && stride % min_stride != 0 {
             return 1;
         }
     }
@@ -170,9 +160,8 @@ fn get_smallest_stride_phase2(strides: &HashSet<u32>) -> u32 {
     min_stride
 }
 
-
-fn get_smallest_stride_from_animation<'a>(frames: impl Iterator<Item=&'a DynamicImage>, ignore_border: bool) -> ImageResult<u32> {
-    let mut strides = HashSet::new();
+fn get_smallest_stride_from_animation<'a>(width: u32, height: u32, frames: impl Iterator<Item=&'a DynamicImage>, ignore_border: bool) -> ImageResult<u32> {
+    let mut strides = vec![false; width.max(height) as usize + 1];
     for frame in frames {
         if !get_smallest_stride_phase1(frame, &mut strides, ignore_border) {
             return Ok(1);
@@ -264,7 +253,7 @@ fn resize_as_animated_gif(width: u32, height: u32, input_frames: Frames, args: A
             0
         }
     } else {
-        get_smallest_stride_from_animation(frames.iter().map(|(_, _, _, img)| img), args.ignore_border)?
+        get_smallest_stride_from_animation(width, height, frames.iter().map(|(_, _, _, img)| img), args.ignore_border)?
     };
     if min_stride <= 1 {
         eprintln!("failed to detect pixel art scaling");
