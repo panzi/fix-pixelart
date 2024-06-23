@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -44,6 +44,7 @@ struct Args {
     input: OsString,
 
     /// Where to write the output.
+    /// Can be a file name or a directory.
     /// [default: "{basename}.scaled.{ext}"]
     #[clap(verbatim_doc_comment)]
     #[arg(default_value = None)]
@@ -83,7 +84,7 @@ fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>) ->
                 if curr_x.stride == 1 {
                     return false;
                 }
-                if curr_x.stride > 0 {
+                if curr_x.stride > 0 && curr_x.color[3] > 0 {
                     strides.insert(curr_x.stride);
                 }
                 curr_x.stride = 1;
@@ -97,7 +98,7 @@ fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>) ->
                 if curr_y.stride == 1 {
                     return false;
                 }
-                if curr_y.stride > 0 {
+                if curr_y.stride > 0 && curr_y.color[3] > 0 {
                     strides.insert(curr_y.stride);
                 }
                 curr_y.stride = 1;
@@ -107,7 +108,7 @@ fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>) ->
         if curr_x.stride == 1 {
             return false;
         }
-        if curr_x.stride > 0 {
+        if curr_x.stride > 0 && curr_x.color[3] > 0 {
             strides.insert(curr_x.stride);
         }
     }
@@ -116,7 +117,7 @@ fn get_smallest_stride_phase1(img: &DynamicImage, strides: &mut HashSet<u32>) ->
         if curr_y.stride == 1 {
             return false;
         }
-        if curr_y.stride > 0 {
+        if curr_y.stride > 0 && curr_y.color[3] > 0 {
             strides.insert(curr_y.stride);
         }
     }
@@ -177,7 +178,7 @@ fn get_smallest_stride_from_animation<'a>(width: u32, height: u32, frames: impl 
 }
 
 fn resize_still_image(img: &DynamicImage, output_format: ImageFormat, args: Args) -> ImageResult<()> {
-    let output = output_from(args.output, args.input.as_os_str(), args.in_place, output_format);
+    let output = output_from(args.output, args.input.as_os_str(), args.in_place, output_format)?;
     let min_stride = get_smallest_stride(&img);
     if min_stride <= 1 {
         eprintln!("failed to detect pixel art scaling");
@@ -197,27 +198,50 @@ fn resize_still_image(img: &DynamicImage, output_format: ImageFormat, args: Args
     Ok(())
 }
 
-fn output_from(output: Option<OsString>, input: &OsStr, in_place: bool, format: ImageFormat) -> OsString {
-    if let Some(output) = output {
-        output
-    } else if in_place {
-        input.to_owned()
-    } else {
-        let path = Path::new(input);
-        let mut output = OsString::new();
-        if let Some(stem) = path.file_stem() {
-            if let Some(parent) = path.parent() {
-                output.push(parent.as_os_str());
-                output.push(std::path::MAIN_SEPARATOR.to_string());
-            }
-            output.push(stem);
-        } else {
-            output.push(input);
-        }
-        output.push(".scaled.");
-        output.push(format.extensions_str()[0]);
-        output
+fn output_from(output: Option<OsString>, input: &OsStr, in_place: bool, format: ImageFormat) -> ImageResult<OsString> {
+    if in_place {
+        return Ok(input.to_owned());
     }
+
+    let mut parent_dir = None;
+    if let Some(output) = output {
+        let path = Path::new(&output);
+        let meta = path.metadata();
+        match meta {
+            Err(err) => {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    return Err(err.into());
+                }
+            }
+            Ok(meta) => {
+                if !meta.is_dir() {
+                    return Ok(output);
+                }
+            }
+        }
+        parent_dir = Some(PathBuf::from(output));
+    }
+
+    let input_path = Path::new(input);
+    let mut output = OsString::new();
+
+    if let Some(parent) = parent_dir.as_deref().or_else(|| input_path.parent()) {
+        let parent = parent.as_os_str();
+        if !parent.is_empty() {
+            output.push(parent);
+            output.push(std::path::MAIN_SEPARATOR.to_string());
+        }
+    }
+
+    if let Some(stem) = input_path.file_stem() {
+        output.push(stem);
+    } else {
+        output.push("pixelart");
+    }
+    output.push(".scaled.");
+    output.push(format.extensions_str()[0]);
+
+    Ok(output)
 }
 
 fn resize_as_animated_gif(width: u32, height: u32, input_frames: Frames, args: Args) -> ImageResult<()> {
@@ -248,7 +272,7 @@ fn resize_as_animated_gif(width: u32, height: u32, input_frames: Frames, args: A
     }
 
     println!("resizing {width} x {height} -> {new_width} x {new_height}");
-    let output = output_from(args.output, args.input.as_os_str(), args.in_place, ImageFormat::Gif);
+    let output = output_from(args.output, args.input.as_os_str(), args.in_place, ImageFormat::Gif)?;
     let writer = BufWriter::new(File::options().write(true).create(true).open(&output)?);
     let mut encoder = GifEncoder::new(writer);
     if frames.len() > 1 {
