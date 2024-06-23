@@ -35,6 +35,7 @@ Arguments:
 
   [OUTPUT]
           Where to write the output.
+          Can be a file name or a directory.
           [default: "{basename}.scaled.{ext}"]
 
 Options:
